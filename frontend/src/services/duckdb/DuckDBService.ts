@@ -21,12 +21,12 @@ class DuckDBService {
       
       const bundles = {
         mvp: {
-          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
-          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
+          mainModule: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm', import.meta.url).toString(),
+          mainWorker: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js', import.meta.url).toString(),
         },
         eh: {
-          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
-          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js',
+          mainModule: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-eh.wasm', import.meta.url).toString(),
+          mainWorker: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js', import.meta.url).toString(),
         }
       };
       
@@ -44,13 +44,18 @@ class DuckDBService {
       console.log('Connecting to DuckDB...');
       this.conn = await this.db.connect();
       
+      const versionResult = await this.conn.query(`SELECT version() AS version;`);
+      console.log('DuckDB Version:', versionResult.toArray()[0].version);
+      
       console.log('Loading HTTPFS extension...');
       try {
         await this.conn.query(`LOAD httpfs;`);
+        console.log('HTTPFS extension loaded successfully');
       } catch (e) {
         console.log('HTTPFS not available, installing it first...');
         await this.conn.query(`INSTALL httpfs;`);
         await this.conn.query(`LOAD httpfs;`);
+        console.log('HTTPFS extension installed and loaded successfully');
       }
       
       console.log('Configuring S3 settings...');
@@ -59,6 +64,8 @@ class DuckDBService {
         SET s3_endpoint='localhost:9000';
         SET s3_use_ssl=false;
         SET s3_url_style='path';
+        SET s3_access_key_id='minioadmin';
+        SET s3_secret_access_key='minioadmin';
       `);
       
       console.log('Testing DuckDB connection...');

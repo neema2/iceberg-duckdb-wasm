@@ -12,8 +12,8 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.806.0",
     "@aws-sdk/s3-request-presigner": "^3.806.0",
-    "@duckdb/duckdb-wasm": "^1.29.1-dev132.0",
-    "@duckdb/duckdb-wasm-shell": "^1.29.1-dev132.0",
+    "@duckdb/duckdb-wasm": "^1.28.0",
+    "@duckdb/duckdb-wasm-shell": "^1.28.0",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.0",
     "@hookform/resolvers": "^5.0.1",
