@@ -19,7 +19,7 @@ class DuckDBService {
       
       const logger = new ConsoleLogger();
       
-      const bundles = {
+      const JSDELIVR_BUNDLES = {
         mvp: {
           mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
           mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
@@ -30,22 +30,56 @@ class DuckDBService {
         }
       };
       
+      const UNPKG_BUNDLES = {
+        mvp: {
+          mainModule: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
+          mainWorker: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
+        },
+        eh: {
+          mainModule: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
+          mainWorker: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js',
+        }
+      };
+      
       console.log('Selecting DuckDB bundle based on browser capabilities...');
       
-      const bundle = await selectBundle(bundles);
+      let bundle;
+      try {
+        bundle = await selectBundle(JSDELIVR_BUNDLES);
+        console.log('Selected bundle from JSDelivr:', bundle);
+      } catch (e) {
+        console.warn('Failed to select bundle from JSDelivr, trying UNPKG:', e);
+        bundle = await selectBundle(UNPKG_BUNDLES);
+        console.log('Selected bundle from UNPKG:', bundle);
+      }
       
-      console.log('Selected bundle:', bundle);
+      if (!bundle) {
+        throw new Error('Failed to select a compatible DuckDB-WASM bundle');
+      }
       
       this.db = new AsyncDuckDB(logger);
       
       console.log('Instantiating DuckDB...');
-      await this.db.instantiate(bundle.mainModule, bundle.mainWorker);
+      
+      const instantiatePromise = this.db.instantiate(bundle.mainModule, bundle.mainWorker);
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('DuckDB instantiation timed out after 10 seconds')), 10000);
+      });
+      
+      await Promise.race([instantiatePromise, timeoutPromise]);
+      
+      console.log('DuckDB instantiated successfully');
       
       console.log('Connecting to DuckDB...');
       this.conn = await this.db.connect();
       
-      const versionResult = await this.conn.query(`SELECT version() AS version;`);
-      console.log('DuckDB Version:', versionResult.toArray()[0].version);
+      try {
+        const versionResult = await this.conn.query(`SELECT 1 AS test;`);
+        console.log('Connection test result:', versionResult.toArray());
+      } catch (e) {
+        console.error('Failed initial connection test:', e);
+        throw new Error('Failed to verify DuckDB connection');
+      }
       
       console.log('Loading HTTPFS extension...');
       try {
@@ -53,29 +87,48 @@ class DuckDBService {
         console.log('HTTPFS extension loaded successfully');
       } catch (e) {
         console.log('HTTPFS not available, installing it first...');
-        await this.conn.query(`INSTALL httpfs;`);
-        await this.conn.query(`LOAD httpfs;`);
-        console.log('HTTPFS extension installed and loaded successfully');
+        try {
+          await this.conn.query(`INSTALL httpfs;`);
+          await this.conn.query(`LOAD httpfs;`);
+          console.log('HTTPFS extension installed and loaded successfully');
+        } catch (installError) {
+          console.error('Failed to install HTTPFS extension:', installError);
+          throw new Error('Failed to install HTTPFS extension');
+        }
       }
       
       console.log('Configuring S3 settings...');
-      await this.conn.query(`
-        SET s3_region='us-east-1';
-        SET s3_endpoint='localhost:9000';
-        SET s3_use_ssl=false;
-        SET s3_url_style='path';
-        SET s3_access_key_id='minioadmin';
-        SET s3_secret_access_key='minioadmin';
-      `);
+      try {
+        await this.conn.query(`
+          SET s3_region='us-east-1';
+          SET s3_endpoint='localhost:9000';
+          SET s3_use_ssl=false;
+          SET s3_url_style='path';
+          SET s3_access_key_id='minioadmin';
+          SET s3_secret_access_key='minioadmin';
+        `);
+        console.log('S3 settings configured successfully');
+      } catch (e) {
+        console.error('Failed to configure S3 settings:', e);
+        throw new Error('Failed to configure S3 settings');
+      }
       
-      console.log('Testing DuckDB connection...');
-      const testResult = await this.conn.query(`SELECT 1 AS test;`);
-      console.log('Test query result:', testResult.toArray());
+      console.log('Testing DuckDB connection with a simple query...');
+      try {
+        const testResult = await this.conn.query(`SELECT 2 AS test;`);
+        console.log('Final test query result:', testResult.toArray());
+      } catch (e) {
+        console.error('Failed final connection test:', e);
+        throw new Error('Failed final DuckDB connection test');
+      }
       
       console.log('DuckDB-WASM initialized successfully');
       this.initialized = true;
     } catch (error) {
       console.error('Error initializing DuckDB:', error);
+      this.initialized = false;
+      this.db = null;
+      this.conn = null;
       throw error;
     }
   }
