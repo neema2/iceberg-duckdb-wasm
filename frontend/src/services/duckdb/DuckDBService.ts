@@ -51,6 +51,15 @@ class DuckDBService {
         throw new Error('Failed to verify DuckDB connection');
       }
       
+      console.log('Setting home directory...');
+      try {
+        await this.conn.query(`SET home_directory='/tmp';`);
+        console.log('Home directory set successfully');
+      } catch (e) {
+        console.error('Failed to set home directory:', e);
+        throw new Error('Failed to set home directory');
+      }
+      
       // Load the HTTPFS extension for S3 access
       console.log('Loading HTTPFS extension...');
       try {
