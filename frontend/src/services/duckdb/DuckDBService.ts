@@ -21,12 +21,12 @@ class DuckDBService {
       
       const bundles = {
         mvp: {
-          mainModule: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm', import.meta.url).toString(),
-          mainWorker: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js', import.meta.url).toString(),
+          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
+          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
         },
         eh: {
-          mainModule: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-eh.wasm', import.meta.url).toString(),
-          mainWorker: new URL('/node_modules/@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js', import.meta.url).toString(),
+          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
+          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js',
         }
       };
       
