@@ -90,6 +90,10 @@ const defaultConfig: S3Config = {
   endpoint: "http://localhost:9000",
   region: "us-east-1",
   forcePathStyle: true,
+  credentials: {
+    accessKeyId: 'minioadmin',
+    secretAccessKey: 'minioadmin'
+  }
 };
 
 const s3Client = new S3Service(defaultConfig, "iceberg-data");
