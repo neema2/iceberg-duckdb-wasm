@@ -1,5 +1,6 @@
-import { AsyncDuckDB, AsyncDuckDBConnection, ConsoleLogger } from '@duckdb/duckdb-wasm';
+import { AsyncDuckDB, AsyncDuckDBConnection, ConsoleLogger, selectBundle } from '@duckdb/duckdb-wasm';
 import IcebergMetadataParser from '../iceberg/IcebergMetadataParser';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 
 class DuckDBService {
   private db: AsyncDuckDB | null = null;
@@ -27,15 +28,24 @@ class DuckDBService {
     try {
       console.log('Initializing DuckDB-WASM with CDN bundles...');
       
+      const JSDELIVR_BUNDLES = {
+        mvp: {
+          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
+          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
+        },
+        eh: {
+          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
+          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js',
+        },
+      };
+      
+      const bundle = await selectBundle(JSDELIVR_BUNDLES);
+      
       const logger = new ConsoleLogger();
+      this.db = new AsyncDuckDB(logger);
       
-      const worker = new Worker('/duckdb/duckdb-browser-eh.worker.js', { type: 'module' });
-      
-      this.db = new AsyncDuckDB(logger, worker);
-      console.log('Created DuckDB instance with worker');
-      
-      console.log('Instantiating DuckDB...');
-      await this.db.instantiate('/duckdb/duckdb-eh.wasm');
+      console.log('Instantiating DuckDB with bundle:', bundle.mainModule);
+      await this.db.instantiate(bundle.mainModule, bundle.mainWorker);
       console.log('DuckDB instantiated successfully');
       
       console.log('Connecting to DuckDB...');
@@ -49,51 +59,6 @@ class DuckDBService {
       } catch (e) {
         console.error('Connection test failed:', e);
         throw new Error('Failed to verify DuckDB connection');
-      }
-      
-      console.log('Setting home directory...');
-      try {
-        await this.conn.query(`SET home_directory='/tmp';`);
-        console.log('Home directory set successfully');
-      } catch (e) {
-        console.error('Failed to set home directory:', e);
-        throw new Error('Failed to set home directory');
-      }
-      
-      // Load the HTTPFS extension for S3 access
-      console.log('Loading HTTPFS extension...');
-      try {
-        await this.conn.query('INSTALL httpfs;');
-        await this.conn.query('LOAD httpfs;');
-        console.log('HTTPFS extension installed and loaded successfully');
-      } catch (e) {
-        console.error('Failed to install/load HTTPFS extension:', e);
-        throw new Error('Failed to install/load HTTPFS extension');
-      }
-      
-      console.log('Configuring S3 settings...');
-      try {
-        await this.conn.query(`
-          SET s3_region='us-east-1';
-          SET s3_endpoint='localhost:9000';
-          SET s3_use_ssl=false;
-          SET s3_url_style='path';
-          SET s3_access_key_id='minioadmin';
-          SET s3_secret_access_key='minioadmin';
-        `);
-        console.log('S3 settings configured successfully');
-      } catch (e) {
-        console.error('Failed to configure S3 settings:', e);
-        throw new Error('Failed to configure S3 settings');
-      }
-      
-      try {
-        console.log('Running final test query...');
-        const result = await this.conn.query('SELECT 2 AS final_test');
-        console.log('Final test result:', result.toArray());
-      } catch (e) {
-        console.error('Final test query failed:', e);
-        throw new Error('Failed to run final test query');
       }
       
       this.initialized = true;
@@ -132,9 +97,10 @@ class DuckDBService {
 
   /**
    * Refresh the Parquet files if the Iceberg metadata has been updated
+   * Uses direct S3 access to fetch data files and register them with DuckDB
    */
   async refreshParquetFiles(): Promise<boolean> {
-    if (!this.icebergParser || !this.conn) {
+    if (!this.icebergParser || !this.conn || !this.db) {
       throw new Error('Iceberg parser or DuckDB connection not initialized');
     }
 
@@ -151,42 +117,101 @@ class DuckDBService {
         
         this.lastUpdatedMs = Date.now();
         
-        const parquetFiles = this.icebergParser.getParquetFiles();
-        console.log(`Found ${parquetFiles.length} Parquet files in Iceberg metadata`);
+        const dataFiles = this.icebergParser.getParquetFiles();
+        console.log(`Found ${dataFiles.length} data files in Iceberg metadata`);
         
-        if (parquetFiles.length > 0) {
-          await this.conn.query(`DROP VIEW IF EXISTS iceberg_data;`);
-          
-          const s3Files = parquetFiles.map(file => {
-            if (file.startsWith('s3://')) {
-              return `'${file}'`;
+        if (dataFiles.length > 0) {
+          const s3Client = new S3Client({
+            endpoint: 'http://localhost:9000',
+            region: 'us-east-1',
+            forcePathStyle: true,
+            credentials: {
+              accessKeyId: 'minioadmin',
+              secretAccessKey: 'minioadmin'
             }
-            return `'s3://iceberg-data/${file}'`;
           });
           
-          const filesStr = s3Files.join(', ');
-          console.log('Creating view for data files...');
+          await this.conn.query(`DROP VIEW IF EXISTS iceberg_data;`);
           
-          const isCSV = parquetFiles.some(file => file.toLowerCase().endsWith('.csv'));
+          await this.conn.query(`CREATE TABLE IF NOT EXISTS temp_iceberg_data (
+            id INTEGER,
+            name VARCHAR,
+            email VARCHAR,
+            age INTEGER,
+            active BOOLEAN,
+            created_at VARCHAR,
+            score DOUBLE,
+            department VARCHAR,
+            partition INTEGER
+          );`);
           
-          if (isCSV) {
-            console.log('Using CSV files...');
-            await this.conn.query(`
-              CREATE VIEW iceberg_data AS 
-              SELECT * FROM read_csv_auto([${filesStr}]);
-            `);
-          } else {
-            console.log('Using Parquet files...');
-            await this.conn.query(`
-              CREATE VIEW iceberg_data AS 
-              SELECT * FROM parquet_scan([${filesStr}]);
-            `);
+          await this.conn.query(`DELETE FROM temp_iceberg_data;`);
+          
+          for (const file of dataFiles) {
+            console.log(`Processing file: ${file}`);
+            
+            try {
+              let bucket = 'iceberg-data';
+              let key = file;
+              
+              if (file.startsWith('s3://')) {
+                const parts = file.replace('s3://', '').split('/');
+                bucket = parts[0];
+                key = parts.slice(1).join('/');
+              }
+              
+              const command = new GetObjectCommand({
+                Bucket: bucket,
+                Key: key
+              });
+              
+              const response = await s3Client.send(command);
+              
+              if (!response.Body) {
+                console.warn(`No body in response for file: ${file}`);
+                continue;
+              }
+              
+              const chunks = [];
+              for await (const chunk of response.Body as any) {
+                chunks.push(chunk);
+              }
+              const buffer = Buffer.concat(chunks);
+              
+              const isCSV = file.toLowerCase().endsWith('.csv');
+              
+              if (isCSV) {
+                await this.db.registerFileBuffer(file, new Uint8Array(buffer));
+                
+                await this.conn.query(`
+                  INSERT INTO temp_iceberg_data
+                  SELECT * FROM read_csv_auto('${file}');
+                `);
+              } else {
+                // For Parquet files
+                await this.db.registerFileBuffer(file, new Uint8Array(buffer));
+                
+                await this.conn.query(`
+                  INSERT INTO temp_iceberg_data
+                  SELECT * FROM parquet_scan('${file}');
+                `);
+              }
+              
+              console.log(`Successfully processed file: ${file}`);
+            } catch (fileError) {
+              console.error(`Error processing file ${file}:`, fileError);
+            }
           }
+          
+          await this.conn.query(`
+            CREATE VIEW iceberg_data AS
+            SELECT * FROM temp_iceberg_data;
+          `);
           
           console.log('View created successfully');
           return true;
         } else {
-          console.warn('No Parquet files found in Iceberg metadata');
+          console.warn('No data files found in Iceberg metadata');
         }
       } else {
         console.log('No updates to Iceberg metadata');
@@ -194,7 +219,7 @@ class DuckDBService {
       
       return false;
     } catch (error) {
-      console.error('Error refreshing Parquet files:', error);
+      console.error('Error refreshing data files:', error);
       throw error;
     }
   }
