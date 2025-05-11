@@ -1,4 +1,4 @@
-import { AsyncDuckDB, AsyncDuckDBConnection, ConsoleLogger, selectBundle } from '@duckdb/duckdb-wasm';
+import { AsyncDuckDB, AsyncDuckDBConnection, ConsoleLogger } from '@duckdb/duckdb-wasm';
 import IcebergMetadataParser from '../iceberg/IcebergMetadataParser';
 
 class DuckDBService {
@@ -7,94 +7,59 @@ class DuckDBService {
   private initialized = false;
   private icebergParser: IcebergMetadataParser | null = null;
   private lastUpdatedMs = 0;
+  private initializationPromise: Promise<void> | null = null;
 
   /**
    * Initialize DuckDB and load the HTTPFS extension for S3 access
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
-
+    
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+    
+    this.initializationPromise = this._initialize();
+    return this.initializationPromise;
+  }
+  
+  private async _initialize(): Promise<void> {
     try {
-      console.log('Initializing DuckDB-WASM...');
+      console.log('Initializing DuckDB-WASM with CDN bundles...');
       
       const logger = new ConsoleLogger();
       
-      const JSDELIVR_BUNDLES = {
-        mvp: {
-          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
-          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
-        },
-        eh: {
-          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
-          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js',
-        }
-      };
+      const worker = new Worker('/duckdb/duckdb-browser-eh.worker.js', { type: 'module' });
       
-      const UNPKG_BUNDLES = {
-        mvp: {
-          mainModule: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
-          mainWorker: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
-        },
-        eh: {
-          mainModule: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
-          mainWorker: 'https://unpkg.com/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js',
-        }
-      };
-      
-      console.log('Selecting DuckDB bundle based on browser capabilities...');
-      
-      let bundle;
-      try {
-        bundle = await selectBundle(JSDELIVR_BUNDLES);
-        console.log('Selected bundle from JSDelivr:', bundle);
-      } catch (e) {
-        console.warn('Failed to select bundle from JSDelivr, trying UNPKG:', e);
-        bundle = await selectBundle(UNPKG_BUNDLES);
-        console.log('Selected bundle from UNPKG:', bundle);
-      }
-      
-      if (!bundle) {
-        throw new Error('Failed to select a compatible DuckDB-WASM bundle');
-      }
-      
-      this.db = new AsyncDuckDB(logger);
+      this.db = new AsyncDuckDB(logger, worker);
+      console.log('Created DuckDB instance with worker');
       
       console.log('Instantiating DuckDB...');
-      
-      const instantiatePromise = this.db.instantiate(bundle.mainModule, bundle.mainWorker);
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('DuckDB instantiation timed out after 10 seconds')), 10000);
-      });
-      
-      await Promise.race([instantiatePromise, timeoutPromise]);
-      
+      await this.db.instantiate('/duckdb/duckdb-eh.wasm');
       console.log('DuckDB instantiated successfully');
       
       console.log('Connecting to DuckDB...');
       this.conn = await this.db.connect();
+      console.log('Connected to DuckDB');
       
       try {
-        const versionResult = await this.conn.query(`SELECT 1 AS test;`);
-        console.log('Connection test result:', versionResult.toArray());
+        console.log('Testing connection with a simple query...');
+        const result = await this.conn.query('SELECT 1 AS test');
+        console.log('Connection test result:', result.toArray());
       } catch (e) {
-        console.error('Failed initial connection test:', e);
+        console.error('Connection test failed:', e);
         throw new Error('Failed to verify DuckDB connection');
       }
       
+      // Load the HTTPFS extension for S3 access
       console.log('Loading HTTPFS extension...');
       try {
-        await this.conn.query(`LOAD httpfs;`);
-        console.log('HTTPFS extension loaded successfully');
+        await this.conn.query('INSTALL httpfs;');
+        await this.conn.query('LOAD httpfs;');
+        console.log('HTTPFS extension installed and loaded successfully');
       } catch (e) {
-        console.log('HTTPFS not available, installing it first...');
-        try {
-          await this.conn.query(`INSTALL httpfs;`);
-          await this.conn.query(`LOAD httpfs;`);
-          console.log('HTTPFS extension installed and loaded successfully');
-        } catch (installError) {
-          console.error('Failed to install HTTPFS extension:', installError);
-          throw new Error('Failed to install HTTPFS extension');
-        }
+        console.error('Failed to install/load HTTPFS extension:', e);
+        throw new Error('Failed to install/load HTTPFS extension');
       }
       
       console.log('Configuring S3 settings...');
@@ -113,22 +78,23 @@ class DuckDBService {
         throw new Error('Failed to configure S3 settings');
       }
       
-      console.log('Testing DuckDB connection with a simple query...');
       try {
-        const testResult = await this.conn.query(`SELECT 2 AS test;`);
-        console.log('Final test query result:', testResult.toArray());
+        console.log('Running final test query...');
+        const result = await this.conn.query('SELECT 2 AS final_test');
+        console.log('Final test result:', result.toArray());
       } catch (e) {
-        console.error('Failed final connection test:', e);
-        throw new Error('Failed final DuckDB connection test');
+        console.error('Final test query failed:', e);
+        throw new Error('Failed to run final test query');
       }
       
-      console.log('DuckDB-WASM initialized successfully');
       this.initialized = true;
+      console.log('DuckDB-WASM initialized successfully');
     } catch (error) {
       console.error('Error initializing DuckDB:', error);
       this.initialized = false;
       this.db = null;
       this.conn = null;
+      this.initializationPromise = null;
       throw error;
     }
   }
@@ -146,7 +112,6 @@ class DuckDBService {
       this.icebergParser = new IcebergMetadataParser(tableLocation);
       await this.icebergParser.initialize();
       
-      this.icebergParser.getTableSchema();
       this.lastUpdatedMs = Date.now();
       
       await this.refreshParquetFiles();
@@ -182,13 +147,6 @@ class DuckDBService {
         
         if (parquetFiles.length > 0) {
           await this.conn.query(`DROP VIEW IF EXISTS iceberg_data;`);
-          
-          await this.conn.query(`
-            SET s3_region='us-east-1';
-            SET s3_endpoint='localhost:9000';
-            SET s3_use_ssl=false;
-            SET s3_url_style='path';
-          `);
           
           const s3Files = parquetFiles.map(file => {
             if (file.startsWith('s3://')) {
@@ -232,10 +190,6 @@ class DuckDBService {
     }
   }
 
-  /**
-   * Execute a SQL query against the Iceberg data
-   * @param query SQL query to execute
-   */
   /**
    * Execute a SQL query against the Iceberg data
    * @param query SQL query to execute
@@ -284,9 +238,6 @@ class DuckDBService {
     }
   }
 
-  /**
-   * Get the schema of the Iceberg table
-   */
   /**
    * Get the schema of the Iceberg table
    * @returns Table schema information as an array of column definitions
@@ -359,6 +310,7 @@ class DuckDBService {
     }
     
     this.initialized = false;
+    this.initializationPromise = null;
   }
 }
 
