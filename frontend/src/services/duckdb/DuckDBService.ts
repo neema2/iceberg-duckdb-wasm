@@ -40,12 +40,21 @@ class DuckDBService {
       };
       
       const bundle = await selectBundle(JSDELIVR_BUNDLES);
+      console.log('Selected bundle:', bundle);
       
       const logger = new ConsoleLogger();
-      this.db = new AsyncDuckDB(logger);
+      
+      console.log('Creating worker with URL:', bundle.mainWorker);
+      if (!bundle.mainWorker) {
+        throw new Error('Worker URL is null or undefined');
+      }
+      const worker = new Worker(bundle.mainWorker, { type: 'module' });
+      
+      console.log('Creating DuckDB instance with worker');
+      this.db = new AsyncDuckDB(logger, worker);
       
       console.log('Instantiating DuckDB with bundle:', bundle.mainModule);
-      await this.db.instantiate(bundle.mainModule, bundle.mainWorker);
+      await this.db.instantiate(bundle.mainModule);
       console.log('DuckDB instantiated successfully');
       
       console.log('Connecting to DuckDB...');
