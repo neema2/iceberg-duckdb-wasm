@@ -19,29 +19,36 @@ class DuckDBService {
       
       const logger = new ConsoleLogger();
       
-      const JSDELIVR_BUNDLES = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm/dist';
-      
-      const bundle = await selectBundle({
+      const bundles = {
         mvp: {
-          mainModule: `${JSDELIVR_BUNDLES}/duckdb-mvp.wasm`,
-          mainWorker: `${JSDELIVR_BUNDLES}/duckdb-browser-mvp.worker.js`,
+          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
+          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js',
         },
         eh: {
-          mainModule: `${JSDELIVR_BUNDLES}/duckdb-eh.wasm`,
-          mainWorker: `${JSDELIVR_BUNDLES}/duckdb-browser-eh.worker.js`,
+          mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
+          mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js',
         }
-      });
+      };
+      
+      console.log('Selecting DuckDB bundle based on browser capabilities...');
+      
+      const bundle = await selectBundle(bundles);
+      
+      console.log('Selected bundle:', bundle);
       
       this.db = new AsyncDuckDB(logger);
       
       await this.db.instantiate(bundle.mainModule, bundle.mainWorker);
       
+      console.log('Connecting to DuckDB...');
       this.conn = await this.db.connect();
       
+      console.log('Loading HTTPFS extension...');
       // Load the HTTPFS extension for S3 access
       await this.conn.query(`INSTALL httpfs;`);
       await this.conn.query(`LOAD httpfs;`);
       
+      console.log('Configuring S3 settings...');
       await this.conn.query(`
         SET s3_region='us-east-1';
         SET s3_endpoint='localhost:9000';
@@ -114,20 +121,31 @@ class DuckDBService {
             SET s3_url_style='path';
           `);
           
-          const s3ParquetFiles = parquetFiles.map(file => {
+          const s3Files = parquetFiles.map(file => {
             if (file.startsWith('s3://')) {
               return `'${file}'`;
             }
             return `'s3://iceberg-data/${file}'`;
           });
           
-          const parquetFilesStr = s3ParquetFiles.join(', ');
-          console.log('Creating view for Parquet files...');
+          const filesStr = s3Files.join(', ');
+          console.log('Creating view for data files...');
           
-          await this.conn.query(`
-            CREATE VIEW iceberg_data AS 
-            SELECT * FROM parquet_scan([${parquetFilesStr}]);
-          `);
+          const isCSV = parquetFiles.some(file => file.toLowerCase().endsWith('.csv'));
+          
+          if (isCSV) {
+            console.log('Using CSV files...');
+            await this.conn.query(`
+              CREATE VIEW iceberg_data AS 
+              SELECT * FROM read_csv_auto([${filesStr}]);
+            `);
+          } else {
+            console.log('Using Parquet files...');
+            await this.conn.query(`
+              CREATE VIEW iceberg_data AS 
+              SELECT * FROM parquet_scan([${filesStr}]);
+            `);
+          }
           
           console.log('View created successfully');
           return true;
