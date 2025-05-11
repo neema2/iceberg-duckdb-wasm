@@ -1,4 +1,4 @@
-import { AsyncDuckDB, AsyncDuckDBConnection } from '@duckdb/duckdb-wasm';
+import { AsyncDuckDB, AsyncDuckDBConnection, ConsoleLogger, selectBundle } from '@duckdb/duckdb-wasm';
 import IcebergMetadataParser from '../iceberg/IcebergMetadataParser';
 
 class DuckDBService {
@@ -17,6 +17,39 @@ class DuckDBService {
     try {
       console.log('Initializing DuckDB-WASM...');
       
+      const logger = new ConsoleLogger();
+      
+      const JSDELIVR_BUNDLES = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm/dist';
+      
+      const bundle = await selectBundle({
+        mvp: {
+          mainModule: `${JSDELIVR_BUNDLES}/duckdb-mvp.wasm`,
+          mainWorker: `${JSDELIVR_BUNDLES}/duckdb-browser-mvp.worker.js`,
+        },
+        eh: {
+          mainModule: `${JSDELIVR_BUNDLES}/duckdb-eh.wasm`,
+          mainWorker: `${JSDELIVR_BUNDLES}/duckdb-browser-eh.worker.js`,
+        }
+      });
+      
+      this.db = new AsyncDuckDB(logger);
+      
+      await this.db.instantiate(bundle.mainModule, bundle.mainWorker);
+      
+      this.conn = await this.db.connect();
+      
+      // Load the HTTPFS extension for S3 access
+      await this.conn.query(`INSTALL httpfs;`);
+      await this.conn.query(`LOAD httpfs;`);
+      
+      await this.conn.query(`
+        SET s3_region='us-east-1';
+        SET s3_endpoint='localhost:9000';
+        SET s3_use_ssl=false;
+        SET s3_url_style='path';
+      `);
+      
+      console.log('DuckDB-WASM initialized successfully');
       this.initialized = true;
     } catch (error) {
       console.error('Error initializing DuckDB:', error);
@@ -56,25 +89,53 @@ class DuckDBService {
     }
 
     try {
+      console.log('Checking for Iceberg metadata updates...');
       const hasUpdates = await this.icebergParser.checkForUpdates(this.lastUpdatedMs);
       
-      if (hasUpdates) {
-        await this.icebergParser.refresh();
+      if (hasUpdates || this.lastUpdatedMs === 0) {
+        console.log('Refreshing Iceberg metadata...');
+        
+        if (hasUpdates) {
+          await this.icebergParser.refresh();
+        }
+        
         this.lastUpdatedMs = Date.now();
         
         const parquetFiles = this.icebergParser.getParquetFiles();
+        console.log(`Found ${parquetFiles.length} Parquet files in Iceberg metadata`);
         
         if (parquetFiles.length > 0) {
           await this.conn.query(`DROP VIEW IF EXISTS iceberg_data;`);
           
-          const parquetFilesStr = parquetFiles.map(file => `'${file}'`).join(', ');
+          await this.conn.query(`
+            SET s3_region='us-east-1';
+            SET s3_endpoint='localhost:9000';
+            SET s3_use_ssl=false;
+            SET s3_url_style='path';
+          `);
+          
+          const s3ParquetFiles = parquetFiles.map(file => {
+            if (file.startsWith('s3://')) {
+              return `'${file}'`;
+            }
+            return `'s3://iceberg-data/${file}'`;
+          });
+          
+          const parquetFilesStr = s3ParquetFiles.join(', ');
+          console.log('Creating view for Parquet files...');
+          
           await this.conn.query(`
             CREATE VIEW iceberg_data AS 
             SELECT * FROM parquet_scan([${parquetFilesStr}]);
           `);
           
+          console.log('View created successfully');
           return true;
+        } else {
+          console.warn('No Parquet files found in Iceberg metadata');
         }
+      } else {
+        console.log('No updates to Iceberg metadata');
       }
       
       return false;
@@ -88,36 +149,111 @@ class DuckDBService {
    * Execute a SQL query against the Iceberg data
    * @param query SQL query to execute
    */
-  async executeQuery(query: string): Promise<any[]> {
+  /**
+   * Execute a SQL query against the Iceberg data
+   * @param query SQL query to execute
+   * @param forceRefresh Whether to force a refresh of the Parquet files
+   * @returns Query results as an array of objects
+   */
+  async executeQuery(query: string, forceRefresh: boolean = false): Promise<any[]> {
     if (!this.initialized || !this.conn) {
-      throw new Error('DuckDB not initialized');
+      await this.initialize();
+      
+      if (!this.initialized || !this.conn) {
+        throw new Error('Failed to initialize DuckDB');
+      }
     }
 
     try {
-      await this.refreshParquetFiles();
+      console.log(`Executing query: ${query}`);
       
-      const result = await this.conn.query(query);
-      return result.toArray();
-    } catch (error) {
+      if (forceRefresh) {
+        console.log('Forcing refresh of Parquet files');
+        await this.refreshParquetFiles();
+      } else {
+        const refreshed = await this.refreshParquetFiles();
+        if (refreshed) {
+          console.log('Parquet files were refreshed due to updates');
+        }
+      }
+      
+      console.log('Running query against DuckDB...');
+      const result = await this.conn!.query(query);
+      
+      const resultArray = result.toArray();
+      console.log(`Query returned ${resultArray.length} rows`);
+      
+      return resultArray;
+    } catch (error: any) {
       console.error('Error executing query:', error);
-      throw error;
+      
+      if (error.message && error.message.includes('not found')) {
+        throw new Error(`Table or view not found. Make sure you've loaded Iceberg data: ${error.message}`);
+      } else if (error.message && error.message.includes('syntax error')) {
+        throw new Error(`SQL syntax error: ${error.message}`);
+      } else {
+        throw new Error(`Error executing query: ${error.message || 'Unknown error'}`);
+      }
     }
   }
 
   /**
    * Get the schema of the Iceberg table
    */
+  /**
+   * Get the schema of the Iceberg table
+   * @returns Table schema information as an array of column definitions
+   */
   async getTableSchema(): Promise<any[]> {
     if (!this.initialized || !this.conn) {
-      throw new Error('DuckDB not initialized');
+      await this.initialize();
+      
+      if (!this.initialized || !this.conn) {
+        throw new Error('Failed to initialize DuckDB');
+      }
     }
 
     try {
-      const result = await this.conn.query(`DESCRIBE iceberg_data;`);
-      return result.toArray();
-    } catch (error) {
+      console.log('Getting table schema...');
+      
+      const viewExists = await this.tableExists('iceberg_data');
+      if (!viewExists) {
+        throw new Error('Iceberg data view does not exist. Make sure you have loaded Iceberg data first.');
+      }
+      
+      const result = await this.conn!.query(`DESCRIBE iceberg_data;`);
+      const schema = result.toArray();
+      
+      console.log(`Schema has ${schema.length} columns`);
+      return schema;
+    } catch (error: any) {
       console.error('Error getting table schema:', error);
-      throw error;
+      throw new Error(`Error getting table schema: ${error.message || 'Unknown error'}`);
+    }
+  }
+  
+  /**
+   * Check if a table or view exists in DuckDB
+   * @param tableName Name of the table or view to check
+   * @returns True if the table or view exists, false otherwise
+   */
+  async tableExists(tableName: string): Promise<boolean> {
+    if (!this.initialized || !this.conn) {
+      return false;
+    }
+    
+    try {
+      const result = await this.conn!.query(`
+        SELECT COUNT(*) as count 
+        FROM information_schema.tables 
+        WHERE table_name = '${tableName}'
+      `);
+      
+      const count = result.toArray()[0].count;
+      return count > 0;
+    } catch (error) {
+      console.error(`Error checking if table ${tableName} exists:`, error);
+      return false;
     }
   }
 
