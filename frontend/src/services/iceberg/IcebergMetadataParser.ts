@@ -92,8 +92,25 @@ class IcebergMetadataParser {
    */
   async initialize(): Promise<void> {
     try {
-      const metadataPath = `${this.tableLocation}/metadata/v2.metadata.json`;
-      this.tableMetadata = await this.s3Client.getObjectAsJson<IcebergTableMetadata>(metadataPath);
+      const metadataFiles = await this.s3Client.listObjects(`${this.tableLocation}/metadata/`);
+      
+      const versionRegex = /v(\d+)\.metadata\.json$/;
+      const metadataVersions = metadataFiles
+        .filter(file => versionRegex.test(file))
+        .sort((a, b) => {
+          const versionA = parseInt(a.match(versionRegex)?.[1] || '0');
+          const versionB = parseInt(b.match(versionRegex)?.[1] || '0');
+          return versionB - versionA; // Sort in descending order
+        });
+      
+      if (metadataVersions.length === 0) {
+        throw new Error(`No metadata files found at ${this.tableLocation}/metadata/`);
+      }
+      
+      const latestMetadataFile = metadataVersions[0];
+      console.log(`Using latest Iceberg metadata file: ${latestMetadataFile}`);
+      
+      this.tableMetadata = await this.s3Client.getObjectAsJson<IcebergTableMetadata>(latestMetadataFile);
       
       await this.extractParquetFilesFromCurrentSnapshot();
     } catch (error) {
@@ -112,6 +129,7 @@ class IcebergMetadataParser {
 
     try {
       const currentSnapshotId = this.tableMetadata.current_snapshot_id;
+      
       const currentSnapshot = this.tableMetadata.snapshots.find(
         (snapshot) => snapshot.snapshot_id === currentSnapshotId
       );
@@ -120,20 +138,57 @@ class IcebergMetadataParser {
         throw new Error(`Current snapshot (ID: ${currentSnapshotId}) not found`);
       }
 
+      console.log(`Processing snapshot ID: ${currentSnapshotId}, timestamp: ${new Date(currentSnapshot.timestamp_ms).toISOString()}`);
+      
+      // Get the manifest list path from the current snapshot
       const manifestListPath = currentSnapshot.manifest_list;
-      const manifestList = await this.s3Client.getObjectAsJson<{ manifests: IcebergManifestFile[] }>(manifestListPath);
-
+      console.log(`Manifest list path: ${manifestListPath}`);
+      
+      let manifestList;
+      try {
+        manifestList = await this.s3Client.getObjectAsJson<{ manifests: IcebergManifestFile[] }>(manifestListPath);
+      } catch (error: any) {
+        console.error(`Error loading manifest list from ${manifestListPath}:`, error);
+        throw new Error(`Failed to load manifest list: ${error?.message || 'Unknown error'}`);
+      }
+      
+      if (!manifestList || !manifestList.manifests || !Array.isArray(manifestList.manifests)) {
+        throw new Error(`Invalid manifest list format at ${manifestListPath}`);
+      }
+      
+      console.log(`Found ${manifestList.manifests.length} manifest files`);
+      
       for (const manifestFile of manifestList.manifests) {
-        const manifestEntries = await this.s3Client.getObjectAsJson<{ entries: IcebergManifestEntry[] }>(
-          manifestFile.manifest_path
-        );
-
-        for (const entry of manifestEntries.entries) {
-          if (entry.status !== 2) { // Not deleted
-            this.parquetFiles.push(entry.data_file.file_path);
+        try {
+          console.log(`Processing manifest: ${manifestFile.manifest_path}`);
+          
+          const manifestEntries = await this.s3Client.getObjectAsJson<{ entries: IcebergManifestEntry[] }>(
+            manifestFile.manifest_path
+          );
+          
+          if (!manifestEntries || !manifestEntries.entries || !Array.isArray(manifestEntries.entries)) {
+            console.warn(`Invalid manifest entries format at ${manifestFile.manifest_path}, skipping`);
+            continue;
           }
+          
+          for (const entry of manifestEntries.entries) {
+            if (entry.status !== 2) {
+              if (!entry.data_file || !entry.data_file.file_path) {
+                console.warn('Manifest entry missing data_file or file_path, skipping');
+                continue;
+              }
+              
+              this.parquetFiles.push(entry.data_file.file_path);
+            }
+          }
+          
+          console.log(`Added ${manifestEntries.entries.length} Parquet files from manifest`);
+        } catch (error) {
+          console.error(`Error processing manifest ${manifestFile.manifest_path}:`, error);
         }
       }
+      
+      console.log(`Total Parquet files found: ${this.parquetFiles.length}`);
     } catch (error) {
       console.error('Error extracting Parquet files from current snapshot:', error);
       throw error;
@@ -165,8 +220,26 @@ class IcebergMetadataParser {
    */
   async checkForUpdates(lastUpdatedMs: number): Promise<boolean> {
     try {
-      const metadataPath = `${this.tableLocation}/metadata/v2.metadata.json`;
-      const metadata = await this.s3Client.getObjectAsJson<IcebergTableMetadata>(metadataPath);
+      const metadataFiles = await this.s3Client.listObjects(`${this.tableLocation}/metadata/`);
+      
+      const versionRegex = /v(\d+)\.metadata\.json$/;
+      const metadataVersions = metadataFiles
+        .filter(file => versionRegex.test(file))
+        .sort((a, b) => {
+          const versionA = parseInt(a.match(versionRegex)?.[1] || '0');
+          const versionB = parseInt(b.match(versionRegex)?.[1] || '0');
+          return versionB - versionA; // Sort in descending order
+        });
+      
+      if (metadataVersions.length === 0) {
+        console.warn(`No metadata files found at ${this.tableLocation}/metadata/`);
+        return false;
+      }
+      
+      const latestMetadataFile = metadataVersions[0];
+      
+      // Load the metadata and check the last_updated_ms timestamp
+      const metadata = await this.s3Client.getObjectAsJson<IcebergTableMetadata>(latestMetadataFile);
       
       return metadata.last_updated_ms > lastUpdatedMs;
     } catch (error) {
