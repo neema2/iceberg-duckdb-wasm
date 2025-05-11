@@ -65,6 +65,22 @@ class DuckDBService {
         console.log('Testing connection with a simple query...');
         const result = await this.conn.query('SELECT 1 AS test');
         console.log('Connection test result:', result.toArray());
+        
+        // Load HTTPFS extension for S3 access
+        console.log('Loading HTTPFS extension...');
+        await this.conn.query('INSTALL httpfs; LOAD httpfs;');
+        
+        console.log('Configuring S3 credentials...');
+        await this.conn.query(`
+          SET s3_region='us-east-1';
+          SET s3_endpoint='localhost:9000';
+          SET s3_use_ssl=false;
+          SET s3_url_style='path';
+          SET s3_access_key_id='minioadmin';
+          SET s3_secret_access_key='minioadmin';
+        `);
+        
+        console.log('S3 credentials configured successfully');
       } catch (e) {
         console.error('Connection test failed:', e);
         throw new Error('Failed to verify DuckDB connection');
