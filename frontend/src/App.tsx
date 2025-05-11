@@ -12,7 +12,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>('query');
   
-  const tableLocation = 'iceberg-data/my-table';
+  const tableLocation = 'my-table';
   
   const handleQueryResults = (newResults: any[], newColumns: string[]) => {
     setResults(newResults);
