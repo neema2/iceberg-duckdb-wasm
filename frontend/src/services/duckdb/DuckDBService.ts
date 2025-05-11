@@ -38,15 +38,20 @@ class DuckDBService {
       
       this.db = new AsyncDuckDB(logger);
       
+      console.log('Instantiating DuckDB...');
       await this.db.instantiate(bundle.mainModule, bundle.mainWorker);
       
       console.log('Connecting to DuckDB...');
       this.conn = await this.db.connect();
       
       console.log('Loading HTTPFS extension...');
-      // Load the HTTPFS extension for S3 access
-      await this.conn.query(`INSTALL httpfs;`);
-      await this.conn.query(`LOAD httpfs;`);
+      try {
+        await this.conn.query(`LOAD httpfs;`);
+      } catch (e) {
+        console.log('HTTPFS not available, installing it first...');
+        await this.conn.query(`INSTALL httpfs;`);
+        await this.conn.query(`LOAD httpfs;`);
+      }
       
       console.log('Configuring S3 settings...');
       await this.conn.query(`
@@ -55,6 +60,10 @@ class DuckDBService {
         SET s3_use_ssl=false;
         SET s3_url_style='path';
       `);
+      
+      console.log('Testing DuckDB connection...');
+      const testResult = await this.conn.query(`SELECT 1 AS test;`);
+      console.log('Test query result:', testResult.toArray());
       
       console.log('DuckDB-WASM initialized successfully');
       this.initialized = true;
